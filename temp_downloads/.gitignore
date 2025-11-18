@@ -1,0 +1,4 @@
+# Temporary downloads folder
+# Files are automatically cleaned up after streaming
+*
+!.gitignore
