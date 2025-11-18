@@ -4,7 +4,7 @@ Thank you for helping keep OmniDwnld secure. This document explains how to repor
 
 ## Reporting a Vulnerability
 
-- Prefer private disclosure: open an email to `security@omnidwnld.local` (replace with a real contact) with details.
+- Prefer private disclosure: open an email to 'arcbyte@tutamail.com' with details.
 - If email is not available, open a private GitHub issue and mark it `security` or contact the repository owner directly.
 
 When reporting, please include:
