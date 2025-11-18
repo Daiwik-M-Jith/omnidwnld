@@ -1,0 +1,85 @@
+Release Title: v1.0.0 — Background Downloads, SSE Progress, Worker Scaffold
+Tag: v1.0.0
+Date: 2025-11-18
+
+Short summary:
+OmniDwnld v1.0.0 introduces a robust background-download architecture, realtime progress
+reporting, and a production-oriented worker scaffold. This release stabilizes the UI, adds
+clear user guidance, and provides the building blocks needed to run heavy processing outside
+of serverless environments.
+
+Highlights:
+- Realtime progress: SSE-based progress streaming for downloads so the UI shows accurate
+  percentage, speed and ETA.
+- Background worker scaffold: Added a BullMQ + Redis worker (in `worker/`) that runs
+  yt-dlp, handles ffmpeg remux/re-encode fallbacks, and uploads artifacts to S3. Includes
+  `Dockerfile`, `index.js`, and a `worker/README.md`.
+- Robust downloader logic: Server-side improvements include yt-dlp invocation, remux-with-copy-first
+  and re-encode fallback via `ffmpeg-static`.
+- UI improvements: Neon warning in the hero and explanatory footnote clarifying that some
+  files may download as `.webm` and how to convert/rename them.
+- Docs & governance: Polished `README.md`, added `LICENSE` (MIT) and `SECURITY.md`.
+- Project ready for hybrid deployment: Guidance and scaffolding to run frontend on Vercel
+  while offloading heavy downloads to the worker.
+
+Files added / changed (high level):
+- Added/modified: `app/page.tsx` (UI notice/footnote)
+- Added: `LICENSE` (MIT)
+- Replaced: `README.md` (polished, deployment-ready)
+- Added: `SECURITY.md` (responsible disclosure)
+- Added worker scaffold: `worker/index.js`, `worker/package.json`, `worker/Dockerfile`,
+  `worker/README.md`
+
+Usage & quick start:
+- Run frontend locally:
+  1) Install deps and run dev:
+     npm install
+     npm run dev
+
+- Run worker (development):
+  From `worker/`:
+     cd worker
+     npm install
+     REDIS_URL=redis://127.0.0.1:6379 S3_BUCKET=your-bucket AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... npm run start
+
+- Build for production:
+     npm run build
+
+Important deployment notes:
+- Vercel is suitable for the frontend, but:
+  - Do NOT run heavy ffmpeg/yt-dlp work in Vercel serverless functions — use the included worker instead.
+  - Replace local SQLite (`better-sqlite3`) with a managed DB (Postgres) for production scale.
+  - Use object storage (S3) for artifacts — serverless filesystem is ephemeral.
+- Worker communicates progress via Redis pub/sub (`progress:<jobId>`). Implement a server-side bridge
+  to forward updates to clients (SSE or WebSocket), or adapt the Next.js API to read progress from Redis.
+
+Upgrade / migration notes:
+- If you were using the previous in-memory job system, migrate to enqueue jobs into Redis/BullMQ:
+  - Add Redis connection string `REDIS_URL`.
+  - Enqueue jobs with payload: `{ url, format, jobId, s3Bucket, targetExt }`.
+  - Run the worker to perform downloads and uploads.
+
+Known issues & caveats:
+- Some ffmpeg builds may lack certain encoders (libx264/aac). If re-encode fails, install/point to
+  an ffmpeg build with required codecs.
+- The release intentionally provides scaffolding; production hardening (retry policies, auth, metrics,
+  logging, rate-limits) is still required before commercial use.
+
+Security & compliance:
+- `SECURITY.md` added with responsible disclosure guidance — replace the placeholder contact email with a
+  real contact before public launch.
+- Project licensed under MIT.
+
+Suggested next steps:
+- Add a Redis-to-SSE bridge in the Next.js server so the UI receives worker progress.
+- Migrate SQLite -> Postgres (e.g., Supabase / PlanetScale).
+- Add CI (GitHub Actions) to run `npm run build` and `npm run lint` on PRs.
+- Add monitoring, retries, authentication, and rate-limiting for production readiness.
+
+Contributors:
+- Project author / maintainer (repo owner): Daiwik-M-Jith
+
+Files of highest interest:
+- `worker/index.js`, `app/api/download/*`, `app/page.tsx`, `README.md`, `LICENSE`, `SECURITY.md`
+
+End of release notes.
