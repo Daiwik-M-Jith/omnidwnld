@@ -36,7 +36,7 @@ export default function Home() {
               </span>
             </div>
             <div className="flex items-center gap-4">
-              <a href="https://github.com" target="_blank" rel="noreferrer" className="text-sm text-gray-400 hover:text-white transition-colors">
+              <a href="https://github.com/Daiwik-M-Jith/omnidwnld" target="_blank" rel="noopener noreferrer" aria-label="Open repository on GitHub" className="text-sm text-gray-400 hover:text-white transition-colors">
                 GitHub
               </a>
             </div>
