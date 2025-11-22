@@ -106,6 +106,10 @@ function buildYtDlpArgs(url: string, platform: string, format: string, outputTem
     '-o', outputTemplate,
     '--no-playlist',
     '--no-warnings',
+    '--newline',
+    '--progress-template', '%(progress)s',
+    '--no-check-certificate',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   ];
 
   if (options.format) args.push('-f', options.format);
@@ -161,13 +165,81 @@ function buildYtDlpArgs(url: string, platform: string, format: string, outputTem
   return { args, options };
 }
 
+export function getFfmpegPath(): string | null {
+  if (ffmpegStaticPath && fs.existsSync(ffmpegStaticPath)) return ffmpegStaticPath;
+  try {
+    const r = spawnSync('ffmpeg', ['-version'], { windowsHide: true });
+    if (!r.error && r.status === 0) return 'ffmpeg';
+  } catch (e) {
+    // ignore
+  }
+  return null;
+}
+
+/**
+ * Try to remux or re-encode a downloaded file to a target extension using ffmpeg.
+ * Returns the new filepath on success or null on failure / if not attempted.
+ */
+function attemptFfmpegRemuxConvert(inputPath: string, targetExt: '.mp4' | '.mp3'): string | null {
+  const ff = getFfmpegPath();
+  if (!ff) return null;
+
+  const dir = path.dirname(inputPath);
+  const base = path.basename(inputPath, path.extname(inputPath));
+  const outPath = path.join(dir, `${base}${targetExt}`);
+
+  // Try fast copy/remux first
+  try {
+    if (targetExt === '.mp4') {
+      const copyArgs = ['-y', '-i', inputPath, '-c', 'copy', outPath];
+      const r = spawnSync(ff, copyArgs, { windowsHide: true });
+      if (!r.error && r.status === 0 && fs.existsSync(outPath)) return outPath;
+
+      // If copy failed, fallback to re-encode
+      const encArgs = ['-y', '-i', inputPath, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '192k', outPath];
+      const r2 = spawnSync(ff, encArgs, { windowsHide: true });
+      if (!r2.error && r2.status === 0 && fs.existsSync(outPath)) return outPath;
+    } else if (targetExt === '.mp3') {
+      const mp3Args = ['-y', '-i', inputPath, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', outPath];
+      const r = spawnSync(ff, mp3Args, { windowsHide: true });
+      if (!r.error && r.status === 0 && fs.existsSync(outPath)) return outPath;
+    }
+    } catch (e) {
+      // ignore and return null
+    }
+    return null;
+}
+
 /**
  * Ensure yt-dlp binary exists
  */
 function getYtDlpBinary(): string {
-  const localBinary = path.join(process.cwd(), 'public', 'yt-dlp.exe');
+  const localBinaryWin = path.join(process.cwd(), 'public', 'yt-dlp.exe');
+  const localBinary = path.join(process.cwd(), 'public', 'yt-dlp');
+  if (fs.existsSync(localBinaryWin)) return localBinaryWin;
   if (fs.existsSync(localBinary)) return localBinary;
-  throw new Error(`yt-dlp binary not found at ${localBinary}. Please ensure yt-dlp.exe is in the public folder.`);
+
+  // Try system install (yt-dlp in PATH)
+  try {
+    const r = spawnSync('yt-dlp', ['--version'], { windowsHide: true });
+    if (r.status === 0) return 'yt-dlp';
+  } catch (e) {
+    // ignore
+  }
+
+  // Try yt-dlp-exec package (node module) path
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ytdlpExec = require('yt-dlp-exec');
+    if (typeof ytdlpExec === 'function') {
+      // We'll rely on system 'yt-dlp' when package is present
+      return 'yt-dlp';
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  throw new Error(`yt-dlp binary not found. Please ensure yt-dlp is available (public/yt-dlp.exe or yt-dlp in PATH).`);
 }
 
 /**
@@ -206,18 +278,50 @@ export function startDownloadJob(url: string, platform: string, format: string, 
       const { args, options } = buildYtDlpArgs(url, platform, format, outputTemplate);
       const binary = getYtDlpBinary();
 
-      console.log(`[Job ${jobId}] Executing: ${binary} ${args.join(' ')}`);
+      // Retry loop: try yt-dlp up to 2 attempts with increasingly permissive flags
+      let attempt = 0;
+      const maxAttempts = 2;
+      let proc: any = null;
+      let lastErr: any = null;
 
-      const proc = spawn(binary, args, { windowsHide: true, cwd: process.cwd() });
+      while (attempt < maxAttempts) {
+        try {
+          const attemptArgs = [...args];
+          if (attempt > 0) {
+            // On retry, add more permissive flags
+            attemptArgs.push('--no-check-certificate', '--force-generic-extractor');
+          }
+          const cmdLine = `${binary} ${attemptArgs.join(' ')}`;
+          console.log(`[Job ${jobId}] Executing attempt ${attempt + 1}: ${cmdLine}`);
+          // record command to logs for diagnostics
+          jobInfo.logs = jobInfo.logs || [];
+          jobInfo.logs.push(`[${new Date().toISOString()}] CMD: ${cmdLine}`);
+          if (jobInfo.logs.length > 500) jobInfo.logs.shift();
+          proc = spawn(binary, attemptArgs, { windowsHide: true, cwd: process.cwd() });
+          break;
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[Job ${jobId}] yt-dlp spawn failed on attempt ${attempt + 1}`, err);
+          attempt++;
+        }
+      }
+
+      if (!proc) {
+        throw lastErr || new Error('Failed to spawn yt-dlp process');
+      }
       const job = jobs.get(jobId);
       if (job) job.proc = proc;
 
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => {
+      proc.stdout.on('data', (data: Buffer) => {
         const text = data.toString();
         stdout += text;
+        // store logs for diagnostics with timestamp
+        jobInfo.logs = jobInfo.logs || [];
+        jobInfo.logs.push(`[${new Date().toISOString()}] STDOUT: ${text}`);
+        if (jobInfo.logs.length > 500) jobInfo.logs.shift();
         // Parse progress
         const matches = Array.from(text.matchAll(/(\d{1,3}(?:\.\d+)?)%/g)) as RegExpMatchArray[];
         if (matches.length > 0) {
@@ -237,8 +341,12 @@ export function startDownloadJob(url: string, platform: string, format: string, 
         }
       });
 
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
+      proc.stderr.on('data', (data: Buffer) => {
+        const t = data.toString();
+        stderr += t;
+        jobInfo.logs = jobInfo.logs || [];
+        jobInfo.logs.push(`[${new Date().toISOString()}] STDERR: ${t}`);
+        if (jobInfo.logs.length > 500) jobInfo.logs.shift();
         // Sometimes progress is in stderr
         const matches = Array.from(data.toString().matchAll(/(\d{1,3}(?:\.\d+)?)%/g)) as RegExpMatchArray[];
         if (matches.length > 0) {
@@ -251,12 +359,36 @@ export function startDownloadJob(url: string, platform: string, format: string, 
         }
       });
 
-      proc.on('close', (code) => {
+      proc.on('error', (err: any) => {
+        // spawn-level errors
+        jobInfo.logs = jobInfo.logs || [];
+        jobInfo.logs.push(`[${new Date().toISOString()}] PROCESS ERROR: ${String(err)}`);
+        jobInfo.status = 'failed';
+        jobInfo.error = `Failed to start downloader process: ${String(err)}`;
+        emitter.emit('error', { jobId, error: jobInfo.error });
+        console.error(`[Job ${jobId}] Process error`, err);
+      });
+
+      proc.on('close', (code: number | null) => {
         if (code !== 0) {
+          // If failed, include stderr in error and mark logs
           jobInfo.status = 'failed';
-          jobInfo.error = `Process exited with code ${code}`;
-          emitter.emit('error', { jobId, error: jobInfo.error });
-          console.error(`[Job ${jobId}] Failed: ${stderr}`);
+          jobInfo.logs = jobInfo.logs || [];
+          jobInfo.logs.push(`yt-dlp exit code ${code}`);
+          jobInfo.logs.push(stderr);
+
+          // Detect common fatal errors and provide friendly messages
+          const stderrLower = (stderr || '').toLowerCase();
+          if (stderrLower.includes('drm')) {
+            jobInfo.error = 'This media appears to be DRM-protected and cannot be downloaded. Try another source (YouTube, SoundCloud) or use a track ripper that matches tracks to non-DRM sources.';
+          } else if (stderrLower.includes('forbidden') || stderrLower.includes('401') || stderrLower.includes('403')) {
+            jobInfo.error = 'Access denied to the media (HTTP 401/403). The resource may require authentication.';
+          } else {
+            jobInfo.error = `Process exited with code ${code}`;
+          }
+
+          emitter.emit('error', { jobId, error: jobInfo.error, stderr });
+          console.error(`[Job ${jobId}] Failed (code ${code}). stderr: ${stderr}`);
           return;
         }
 
@@ -273,11 +405,44 @@ export function startDownloadJob(url: string, platform: string, format: string, 
           return;
         }
 
-        const filename = files[0];
-        const filepath = path.join(tempDir, filename);
+        let filename = files[0];
+        let filepath = path.join(tempDir, filename);
         jobInfo.filePath = filepath;
         jobInfo.filename = filename.replace(`${platform}_${timestamp}_`, '');
         jobInfo.fileSize = (fs.statSync(filepath) || { size: 0 }).size;
+
+        // If the downloaded file is a WebM/M4A/etc and we requested MP4/MP3, try ffmpeg remux/encode
+        const ext = path.extname(filepath).toLowerCase();
+        try {
+          if (ext === '.webm' || ext === '.mkv' || ext === '.flv') {
+            // prefer mp4 for video
+            const target = attemptFfmpegRemuxConvert(filepath, '.mp4');
+            if (target) {
+              // replace record
+              try { fs.unlinkSync(filepath); } catch (e) { /* ignore */ }
+              filepath = target;
+              filename = path.basename(filepath);
+              jobInfo.filePath = filepath;
+              jobInfo.filename = filename.replace(`${platform}_${timestamp}_`, '');
+              jobInfo.fileSize = (fs.statSync(filepath) || { size: 0 }).size;
+            }
+          } else if (ext === '.m4a' || ext === '.opus' || ext === '.aac') {
+            // prefer mp3 for audio downloads
+            const target = attemptFfmpegRemuxConvert(filepath, '.mp3');
+            if (target) {
+              try { fs.unlinkSync(filepath); } catch (e) { /* ignore */ }
+              filepath = target;
+              filename = path.basename(filepath);
+              jobInfo.filePath = filepath;
+              jobInfo.filename = filename.replace(`${platform}_${timestamp}_`, '');
+              jobInfo.fileSize = (fs.statSync(filepath) || { size: 0 }).size;
+            }
+          }
+        } catch (e) {
+          jobInfo.logs = jobInfo.logs || [];
+          jobInfo.logs.push(`[${new Date().toISOString()}] FFMPEG_CONVERT_ERROR: ${String(e)}`);
+        }
+
         jobInfo.status = 'completed';
         jobInfo.progress = 100;
 
